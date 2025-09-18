@@ -49,6 +49,15 @@
   /** @type {CanvasRenderingContext2D} */
   const maskCtx = maskCanvas.getContext('2d', { alpha: false, willReadFrequently: true });
   const positionCtx = positionCanvas ? positionCanvas.getContext('2d', { alpha: false, willReadFrequently: true }) : null;
+  const visibilityState = {
+    suspended: false,
+    hiddenAt: 0,
+    needsResume: false,
+    resumeBox: null,
+    resumeCenter: null,
+    resumeExact: false
+  };
+  let visibilityOcrSuspended = false;
   let posWinLastAt = 0;
   const posWinIntervalMs = 1000 / 6; // ~6 fps to keep main thread light
   let maskLastAt = 0;
@@ -207,6 +216,12 @@
       cancelAnimationFrame(animationFrameId);
       animationFrameId = null;
     }
+    visibilityState.suspended = false;
+    visibilityState.needsResume = false;
+    visibilityState.resumeBox = null;
+    visibilityState.resumeCenter = null;
+    visibilityState.resumeExact = false;
+    visibilityOcrSuspended = false;
     if (mediaStream) {
       mediaStream.getTracks().forEach(t => t.stop());
       mediaStream = null;
@@ -548,6 +563,93 @@
     cropRect = { x, y, w, h };
   });
 
+  function handleVisibilityChange() {
+    if (document.hidden) {
+      visibilityState.hiddenAt = Date.now();
+      visibilityState.suspended = true;
+      visibilityOcrSuspended = true;
+      if (!mediaStream) {
+        visibilityState.needsResume = false;
+        return;
+      }
+      visibilityState.needsResume = true;
+      if (lastExactBox) {
+        visibilityState.resumeBox = { ...lastExactBox };
+        visibilityState.resumeExact = true;
+        visibilityState.resumeCenter = lastExactCenter ? { ...lastExactCenter } : null;
+      } else if (trackBox) {
+        visibilityState.resumeBox = { ...trackBox };
+        visibilityState.resumeExact = false;
+        visibilityState.resumeCenter = null;
+      } else {
+        visibilityState.resumeBox = null;
+        visibilityState.resumeExact = false;
+        visibilityState.resumeCenter = null;
+      }
+      if (trackerActive) {
+        stopTemplateTracking();
+      }
+    } else {
+      visibilityState.suspended = false;
+      visibilityOcrSuspended = false;
+      if (!mediaStream || !visibilityState.needsResume) {
+        visibilityState.needsResume = false;
+        visibilityState.resumeBox = null;
+        visibilityState.resumeCenter = null;
+        visibilityState.resumeExact = false;
+        return;
+      }
+      maskLastAt = 0;
+      posWinLastAt = 0;
+      const hiddenDuration = visibilityState.hiddenAt ? (Date.now() - visibilityState.hiddenAt) : 0;
+      const resumeBox = visibilityState.resumeBox ? { ...visibilityState.resumeBox } : null;
+      const resumeExact = visibilityState.resumeExact && !!resumeBox;
+      if (resumeExact) {
+        lastExactBox = { ...resumeBox };
+        const center = visibilityState.resumeCenter || {
+          x: resumeBox.x + Math.round(resumeBox.w / 2),
+          y: resumeBox.y + Math.round(resumeBox.h / 2)
+        };
+        lastExactCenter = center;
+        let pad = roiPadPx;
+        if (hiddenDuration > 8000) pad = Math.round(pad * 2.5);
+        else if (hiddenDuration > 4000) pad = Math.round(pad * 1.5);
+        ocrRoi = clampRect(
+          resumeBox.x - pad,
+          resumeBox.y - pad,
+          resumeBox.w + pad * 2,
+          resumeBox.h + pad * 2,
+          trackCanvas.width,
+          trackCanvas.height
+        );
+        ocrNoHitCount = 0;
+        drawPositionOverlay();
+      } else {
+        ocrRoi = null;
+        ocrNoHitCount = 0;
+      }
+      if (resumeBox) {
+        if (!resumeExact && hiddenDuration > 6000) {
+          resumeBox.x = Math.max(0, resumeBox.x - Math.round(resumeBox.w * 0.35));
+          resumeBox.y = Math.max(0, resumeBox.y - Math.round(resumeBox.h * 0.35));
+          const maxW = Math.max(1, trackCanvas.width - resumeBox.x);
+          const maxH = Math.max(1, trackCanvas.height - resumeBox.y);
+          resumeBox.w = Math.min(maxW, Math.max(1, Math.round(resumeBox.w * 1.7)));
+          resumeBox.h = Math.min(maxH, Math.max(1, Math.round(resumeBox.h * 1.7)));
+        }
+        resumeTemplateTracking(resumeBox);
+      }
+      visibilityState.needsResume = false;
+      visibilityState.resumeBox = null;
+      visibilityState.resumeCenter = null;
+      visibilityState.resumeExact = false;
+      visibilityState.hiddenAt = 0;
+      if (mediaStream && !animationFrameId) {
+        loop();
+      }
+    }
+  }
+
   watchBtn.addEventListener('click', () => {
     if (mediaStream) {
       stopStream();
@@ -565,6 +667,7 @@
   ro.observe(previewWrap);
   resizeCanvases();
   setUiCapturing(false);
+  document.addEventListener('visibilitychange', handleVisibilityChange);
 
   // UI handlers for OCR speed and GPU toggle
   if (fpsSelect) {
@@ -797,6 +900,10 @@
     const fullEveryMs = 2500; // periodic full-frame OCR to re-acquire
     while (ocrActive && mediaStream) {
       try {
+        if (visibilityOcrSuspended) {
+          await new Promise(r => setTimeout(r, 200));
+          continue;
+        }
         // Update OCR parameters dynamically when lockExact toggles
         if (lastLockExactApplied !== lockExact) {
           lastLockExactApplied = lockExact;
@@ -990,6 +1097,32 @@
       trackerActive = true;
       scheduleTrackerTick();
     }
+  }
+
+  function resumeTemplateTracking(box) {
+    const target = box ? { ...box } : null;
+    if (!target) return;
+    let attempts = 0;
+    const maxAttempts = 6;
+    const tryStart = () => {
+      if (!mediaStream || document.hidden) return;
+      if (trackCanvas.width < 2 || trackCanvas.height < 2) {
+        if (attempts++ < maxAttempts) {
+          requestAnimationFrame(tryStart);
+        }
+        return;
+      }
+      const safeBox = clampRect(
+        target.x,
+        target.y,
+        target.w,
+        target.h,
+        trackCanvas.width,
+        trackCanvas.height
+      );
+      startTemplateTracking(safeBox);
+    };
+    requestAnimationFrame(tryStart);
   }
 
   function stopTemplateTracking() {
