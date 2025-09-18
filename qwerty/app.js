@@ -49,6 +49,15 @@
   /** @type {CanvasRenderingContext2D} */
   const maskCtx = maskCanvas.getContext('2d', { alpha: false, willReadFrequently: true });
   const positionCtx = positionCanvas ? positionCanvas.getContext('2d', { alpha: false, willReadFrequently: true }) : null;
+  const visibilityState = {
+    suspended: false,
+    hiddenAt: 0,
+    needsResume: false,
+    resumeBox: null,
+    resumeCenter: null,
+    resumeExact: false
+  };
+  let visibilityOcrSuspended = false;
   let posWinLastAt = 0;
   const posWinIntervalMs = 1000 / 6; // ~6 fps to keep main thread light
   let maskLastAt = 0;
@@ -111,6 +120,16 @@
   const MAX_LOG_ENTRIES = 300;
   let lastExactCenter = null;
   let lastExactBox = null; // {x,y,w,h} in trackCanvas space
+  let lastTrackCenter = null;
+  let lastTrackBox = null;
+
+  const positionBuffer = positionCanvas
+    ? (() => {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        return { canvas, ctx };
+      })()
+    : null;
 
   function addPositionLog(x, y) {
     positionLog.push({ t: Date.now(), x, y });
@@ -123,16 +142,17 @@
     const dpr = window.devicePixelRatio || 1;
     const ctx = trackOverlayCtx;
     ctx.save();
-    // Crosshair at last exact center
-    if (lastExactCenter) {
-      ctx.strokeStyle = 'rgba(0, 209, 255, 0.9)';
+    const focusCenter = lastExactCenter || lastTrackCenter;
+    if (focusCenter) {
+      const isExact = !!lastExactCenter;
+      ctx.strokeStyle = isExact ? 'rgba(0, 209, 255, 0.9)' : 'rgba(255, 191, 0, 0.85)';
       ctx.lineWidth = 1.5 * dpr;
       ctx.setLineDash([]);
       ctx.beginPath();
-      ctx.moveTo(lastExactCenter.x - 6 * dpr, lastExactCenter.y);
-      ctx.lineTo(lastExactCenter.x + 6 * dpr, lastExactCenter.y);
-      ctx.moveTo(lastExactCenter.x, lastExactCenter.y - 6 * dpr);
-      ctx.lineTo(lastExactCenter.x, lastExactCenter.y + 6 * dpr);
+      ctx.moveTo(focusCenter.x - 6 * dpr, focusCenter.y);
+      ctx.lineTo(focusCenter.x + 6 * dpr, focusCenter.y);
+      ctx.moveTo(focusCenter.x, focusCenter.y - 6 * dpr);
+      ctx.lineTo(focusCenter.x, focusCenter.y + 6 * dpr);
       ctx.stroke();
     }
     // Recent coordinates (last 8)
@@ -207,6 +227,12 @@
       cancelAnimationFrame(animationFrameId);
       animationFrameId = null;
     }
+    visibilityState.suspended = false;
+    visibilityState.needsResume = false;
+    visibilityState.resumeBox = null;
+    visibilityState.resumeCenter = null;
+    visibilityState.resumeExact = false;
+    visibilityOcrSuspended = false;
     if (mediaStream) {
       mediaStream.getTracks().forEach(t => t.stop());
       mediaStream = null;
@@ -218,6 +244,8 @@
     overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
     trackCtx.clearRect(0, 0, trackCanvas.width, trackCanvas.height);
     trackOverlayCtx.clearRect(0, 0, trackOverlayCanvas.width, trackOverlayCanvas.height);
+    lastTrackCenter = null;
+    lastTrackBox = null;
     stopOcr();
     stopCloudOcr();
   }
@@ -329,7 +357,8 @@
         // Map lastExactCenter from trackCanvas space back to current crop-relative coords
         let centerX = Math.round(srcW / 2);
         let centerY = Math.round(srcH / 2);
-        if (lastExactCenter) {
+        const anchorCenter = lastExactCenter || lastTrackCenter;
+        if (anchorCenter) {
           // lastExactCenter is in trackCanvas space (after letterboxing). Compute crop draw params to map back
           const cw = trackCanvas.width;
           const ch = trackCanvas.height;
@@ -338,8 +367,8 @@
           let dw, dh, dx, dy;
           if (srcAR > dstAR) { dw = cw; dh = Math.round(cw / srcAR); dx = 0; dy = Math.round((ch - dh) / 2); }
           else { dh = ch; dw = Math.round(ch * srcAR); dy = 0; dx = Math.round((cw - dw) / 2); }
-          const u = (lastExactCenter.x - dx) / (dw || 1);
-          const v = (lastExactCenter.y - dy) / (dh || 1);
+          const u = (anchorCenter.x - dx) / (dw || 1);
+          const v = (anchorCenter.y - dy) / (dh || 1);
           centerX = Math.max(0, Math.min(srcW - 1, Math.round(crop.x + u * srcW) - crop.x));
           centerY = Math.max(0, Math.min(srcH - 1, Math.round(crop.y + v * srcH) - crop.y));
         }
@@ -426,17 +455,22 @@
           if (srcAR > dstAR) { dw = dstW; dh = Math.round(dstW / srcAR); dx = 0; dy = Math.round((dstH - dh) / 2); }
           else { dh = dstH; dw = Math.round(dstH * srcAR); dy = 0; dx = Math.round((dstW - dw) / 2); }
           // Read mask image, convert any non-black to white
-          const bufCanvas = document.createElement('canvas');
-          bufCanvas.width = srcW; bufCanvas.height = srcH;
-          const bufCtx = bufCanvas.getContext('2d', { willReadFrequently: true });
-          bufCtx.drawImage(maskCanvas, 0, 0);
-          const img = bufCtx.getImageData(0, 0, srcW, srcH);
-          const d = img.data;
-          for (let i = 0; i < d.length; i += 4) {
-            if (d[i] | d[i+1] | d[i+2]) { d[i] = 255; d[i+1] = 255; d[i+2] = 255; } // non-black -> white
+          if (positionBuffer) {
+            const bufCanvas = positionBuffer.canvas;
+            const bufCtx = positionBuffer.ctx;
+            if (bufCanvas.width !== srcW || bufCanvas.height !== srcH) {
+              bufCanvas.width = srcW; bufCanvas.height = srcH;
+            }
+            bufCtx.clearRect(0, 0, srcW, srcH);
+            bufCtx.drawImage(maskCanvas, 0, 0);
+            const img = bufCtx.getImageData(0, 0, srcW, srcH);
+            const d = img.data;
+            for (let i = 0; i < d.length; i += 4) {
+              if (d[i] | d[i+1] | d[i+2]) { d[i] = 255; d[i+1] = 255; d[i+2] = 255; }
+            }
+            bufCtx.putImageData(img, 0, 0);
+            positionCtx.drawImage(bufCanvas, 0, 0, srcW, srcH, dx, dy, dw, dh);
           }
-          bufCtx.putImageData(img, 0, 0);
-          positionCtx.drawImage(bufCanvas, 0, 0, srcW, srcH, dx, dy, dw, dh);
         }
       } catch {}
     }
@@ -548,6 +582,94 @@
     cropRect = { x, y, w, h };
   });
 
+  function handleVisibilityChange() {
+    if (document.hidden) {
+      visibilityState.hiddenAt = Date.now();
+      visibilityState.suspended = true;
+      visibilityOcrSuspended = true;
+      if (!mediaStream) {
+        visibilityState.needsResume = false;
+        return;
+      }
+      visibilityState.needsResume = true;
+      const resumeSource = lastExactBox
+        ? { box: lastExactBox, exact: true, center: lastExactCenter }
+        : (lastTrackBox
+            ? { box: lastTrackBox, exact: false, center: lastTrackCenter }
+            : (trackBox ? { box: trackBox, exact: false, center: null } : null));
+      if (resumeSource) {
+        visibilityState.resumeBox = { ...resumeSource.box };
+        visibilityState.resumeExact = !!resumeSource.exact;
+        visibilityState.resumeCenter = resumeSource.center ? { ...resumeSource.center } : null;
+      } else {
+        visibilityState.resumeBox = null;
+        visibilityState.resumeExact = false;
+        visibilityState.resumeCenter = null;
+      }
+      if (trackerActive) {
+        stopTemplateTracking();
+      }
+    } else {
+      visibilityState.suspended = false;
+      visibilityOcrSuspended = false;
+      if (!mediaStream || !visibilityState.needsResume) {
+        visibilityState.needsResume = false;
+        visibilityState.resumeBox = null;
+        visibilityState.resumeCenter = null;
+        visibilityState.resumeExact = false;
+        return;
+      }
+      maskLastAt = 0;
+      posWinLastAt = 0;
+      const hiddenDuration = visibilityState.hiddenAt ? (Date.now() - visibilityState.hiddenAt) : 0;
+      const resumeBox = visibilityState.resumeBox ? { ...visibilityState.resumeBox } : null;
+      const resumeExact = visibilityState.resumeExact && !!resumeBox;
+      if (resumeExact) {
+        lastExactBox = { ...resumeBox };
+        const center = visibilityState.resumeCenter || {
+          x: resumeBox.x + Math.round(resumeBox.w / 2),
+          y: resumeBox.y + Math.round(resumeBox.h / 2)
+        };
+        lastExactCenter = center;
+        let pad = roiPadPx;
+        if (hiddenDuration > 8000) pad = Math.round(pad * 2.5);
+        else if (hiddenDuration > 4000) pad = Math.round(pad * 1.5);
+        ocrRoi = clampRect(
+          resumeBox.x - pad,
+          resumeBox.y - pad,
+          resumeBox.w + pad * 2,
+          resumeBox.h + pad * 2,
+          trackCanvas.width,
+          trackCanvas.height
+        );
+        ocrNoHitCount = 0;
+        drawPositionOverlay();
+      } else {
+        ocrRoi = null;
+        ocrNoHitCount = 0;
+      }
+      if (resumeBox) {
+        if (!resumeExact && hiddenDuration > 6000) {
+          resumeBox.x = Math.max(0, resumeBox.x - Math.round(resumeBox.w * 0.35));
+          resumeBox.y = Math.max(0, resumeBox.y - Math.round(resumeBox.h * 0.35));
+          const maxW = Math.max(1, trackCanvas.width - resumeBox.x);
+          const maxH = Math.max(1, trackCanvas.height - resumeBox.y);
+          resumeBox.w = Math.min(maxW, Math.max(1, Math.round(resumeBox.w * 1.7)));
+          resumeBox.h = Math.min(maxH, Math.max(1, Math.round(resumeBox.h * 1.7)));
+        }
+        resumeTemplateTracking(resumeBox);
+      }
+      visibilityState.needsResume = false;
+      visibilityState.resumeBox = null;
+      visibilityState.resumeCenter = null;
+      visibilityState.resumeExact = false;
+      visibilityState.hiddenAt = 0;
+      if (mediaStream && !animationFrameId) {
+        loop();
+      }
+    }
+  }
+
   watchBtn.addEventListener('click', () => {
     if (mediaStream) {
       stopStream();
@@ -565,6 +687,7 @@
   ro.observe(previewWrap);
   resizeCanvases();
   setUiCapturing(false);
+  document.addEventListener('visibilitychange', handleVisibilityChange);
 
   // UI handlers for OCR speed and GPU toggle
   if (fpsSelect) {
@@ -797,6 +920,10 @@
     const fullEveryMs = 2500; // periodic full-frame OCR to re-acquire
     while (ocrActive && mediaStream) {
       try {
+        if (visibilityOcrSuspended) {
+          await new Promise(r => setTimeout(r, 200));
+          continue;
+        }
         // Update OCR parameters dynamically when lockExact toggles
         if (lastLockExactApplied !== lockExact) {
           lastLockExactApplied = lockExact;
@@ -970,21 +1097,45 @@
     tmplCanvas.width = w; tmplCanvas.height = h;
     tmplCtx.drawImage(trackCanvas, x, y, w, h, 0, 0, w, h);
     const img = tmplCtx.getImageData(0, 0, w, h);
-    const gray = new Uint8ClampedArray(w * h);
+    const len = w * h;
+    const gray = new Float32Array(len);
     let sum = 0;
     for (let i = 0, j = 0; i < img.data.length; i += 4, j++) {
       const r = img.data[i], g = img.data[i+1], b = img.data[i+2];
-      const v = (r * 77 + g * 150 + b * 29) >> 8; // 0..255
+      const v = (r * 77 + g * 150 + b * 29) * (1 / 256);
       gray[j] = v; sum += v;
     }
-    const mean = sum / gray.length;
-    return { data: gray, w, h, mean };
+    const mean = sum / len;
+    const zeroMean = new Float32Array(len);
+    let normSq = 0;
+    for (let i = 0; i < len; i++) {
+      const zm = gray[i] - mean;
+      zeroMean[i] = zm;
+      normSq += zm * zm;
+    }
+    if (normSq <= 1e-3) return null; // too little contrast to track reliably
+    return {
+      w,
+      h,
+      zeroMean,
+      norm: Math.sqrt(normSq),
+      mean,
+      anchorX: box.x - x,
+      anchorY: box.y - y
+    };
   }
 
   function startTemplateTracking(box) {
-    template = extractTemplateFromBox(box);
-    if (!template) return;
+    const tpl = extractTemplateFromBox(box);
+    if (!tpl) return;
+    template = tpl;
     trackBox = { ...box };
+    lastTrackBox = { ...box };
+    lastTrackCenter = {
+      x: box.x + Math.round(box.w / 2),
+      y: box.y + Math.round(box.h / 2)
+    };
+    updateRoiFromTracker(trackBox, true);
     lostFrames = 0;
     if (!trackerActive) {
       trackerActive = true;
@@ -992,10 +1143,38 @@
     }
   }
 
+  function resumeTemplateTracking(box) {
+    const target = box ? { ...box } : null;
+    if (!target) return;
+    let attempts = 0;
+    const maxAttempts = 6;
+    const tryStart = () => {
+      if (!mediaStream || document.hidden) return;
+      if (trackCanvas.width < 2 || trackCanvas.height < 2) {
+        if (attempts++ < maxAttempts) {
+          requestAnimationFrame(tryStart);
+        }
+        return;
+      }
+      const safeBox = clampRect(
+        target.x,
+        target.y,
+        target.w,
+        target.h,
+        trackCanvas.width,
+        trackCanvas.height
+      );
+      startTemplateTracking(safeBox);
+    };
+    requestAnimationFrame(tryStart);
+  }
+
   function stopTemplateTracking() {
     trackerActive = false;
     if (trackerTimer) { clearTimeout(trackerTimer); trackerTimer = null; }
     template = null; trackBox = null; lostFrames = 0;
+    if (!lastExactCenter) lastTrackCenter = null;
+    if (!lastExactBox) lastTrackBox = null;
   }
 
   function scheduleTrackerTick() {
@@ -1005,65 +1184,162 @@
 
   function trackerTick() {
     if (!trackerActive || !template || !trackBox) { scheduleTrackerTick(); return; }
-    // Define a small search window around previous location
+    const tplW = template.w;
+    const tplH = template.h;
+    const anchorX = template.anchorX || 0;
+    const anchorY = template.anchorY || 0;
     const margin = Math.round(Math.max(10, Math.min(trackCanvas.width, trackCanvas.height) * 0.1));
-    const sx = Math.max(0, trackBox.x - margin);
-    const sy = Math.max(0, trackBox.y - margin);
-    const ex = Math.min(trackCanvas.width - template.w, trackBox.x + margin);
-    const ey = Math.min(trackCanvas.height - template.h, trackBox.y + margin);
+    const tplOriginX = trackBox.x - anchorX;
+    const tplOriginY = trackBox.y - anchorY;
+    const sx = Math.max(0, tplOriginX - margin);
+    const sy = Math.max(0, tplOriginY - margin);
+    const ex = Math.min(trackCanvas.width - tplW, tplOriginX + margin);
+    const ey = Math.min(trackCanvas.height - tplH, tplOriginY + margin);
     if (ex <= sx || ey <= sy) { lostFrames++; scheduleTrackerTick(); return; }
 
-    const sw = ex - sx + 1; const sh = ey - sy + 1;
+    const sw = ex - sx + 1;
+    const sh = ey - sy + 1;
     searchCanvas.width = sw; searchCanvas.height = sh;
     searchCtx.drawImage(trackCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
     const sImg = searchCtx.getImageData(0, 0, sw, sh);
+    const len = sw * sh;
 
-    // Normalized cross-correlation (approximate, step through pixels)
-    let bestScore = -1, bestX = 0, bestY = 0;
-    const tData = template.data, tw = template.w, th = template.h, tLen = tw * th, tMean = template.mean;
+    if (!trackerTick._gray || trackerTick._gray.length !== len) {
+      trackerTick._gray = new Float32Array(len);
+      trackerTick._integral = new Float32Array(len);
+      trackerTick._integralSq = new Float32Array(len);
+    }
+    const gray = trackerTick._gray;
+    const integral = trackerTick._integral;
+    const integralSq = trackerTick._integralSq;
+
     const sData = sImg.data;
-    const rowStride = sw * 4;
-    for (let y = 0; y <= sh - th; y += trackerStep) {
-      for (let x = 0; x <= sw - tw; x += trackerStep) {
-        let sum = 0, sumSq = 0, cross = 0;
-        let idx = y * rowStride + x * 4;
-        for (let j = 0; j < th; j++) {
-          let idxRow = idx;
-          for (let i = 0; i < tw; i++) {
-            const r = sData[idxRow], g = sData[idxRow+1], b = sData[idxRow+2];
-            const v = (r * 77 + g * 150 + b * 29) >> 8;
-            sum += v; sumSq += v * v; cross += (v - 128) * (tData[j * tw + i] - 128);
-            idxRow += 4;
-          }
-          idx += rowStride;
-        }
-        const mean = sum / tLen;
-        const denom = Math.sqrt(Math.max(1, sumSq - tLen * mean * mean)) * Math.sqrt(Math.max(1, tLen * 128 * 128));
-        const score = cross / denom;
-        if (score > bestScore) { bestScore = score; bestX = x; bestY = y; }
+    for (let i = 0, j = 0; i < sData.length; i += 4, j++) {
+      gray[j] = (sData[i] * 77 + sData[i+1] * 150 + sData[i+2] * 29) * (1 / 256);
+    }
+
+    for (let y = 0, idx = 0; y < sh; y++) {
+      let rowSum = 0;
+      let rowSumSq = 0;
+      for (let x = 0; x < sw; x++, idx++) {
+        const v = gray[idx];
+        rowSum += v;
+        rowSumSq += v * v;
+        const aboveIdx = idx - sw;
+        const above = y > 0 ? integral[aboveIdx] : 0;
+        const aboveSq = y > 0 ? integralSq[aboveIdx] : 0;
+        integral[idx] = rowSum + above;
+        integralSq[idx] = rowSumSq + aboveSq;
       }
     }
 
-    // Threshold for acceptance
-    if (bestScore > 0.12) {
-      // Exponential smoothing for steadier motion
+    const areaSum = (arr, x, y, w, h) => {
+      const x2 = x + w - 1;
+      const y2 = y + h - 1;
+      const idxA = y2 * sw + x2;
+      const A = arr[idxA];
+      const B = x > 0 ? arr[y2 * sw + (x - 1)] : 0;
+      const C = y > 0 ? arr[(y - 1) * sw + x2] : 0;
+      const D = (x > 0 && y > 0) ? arr[(y - 1) * sw + (x - 1)] : 0;
+      return A - B - C + D;
+    };
+
+    let bestScore = -2;
+    let bestTplX = 0;
+    let bestTplY = 0;
+    const templatePixels = template.zeroMean;
+    const tplNorm = template.norm;
+    const tplLen = templatePixels.length;
+    const acceptThreshold = 0.38;
+
+    for (let y = 0; y <= sh - tplH; y += trackerStep) {
+      for (let x = 0; x <= sw - tplW; x += trackerStep) {
+        const sum = areaSum(integral, x, y, tplW, tplH);
+        const mean = sum / tplLen;
+        const sumSq = areaSum(integralSq, x, y, tplW, tplH);
+        const variance = sumSq - mean * mean * tplLen;
+        if (variance <= 1e-3) continue;
+        const denom = Math.sqrt(variance) * tplNorm;
+        if (!Number.isFinite(denom) || denom <= 1e-6) continue;
+        let cross = 0;
+        let idxTemplate = 0;
+        let idxSearch = y * sw + x;
+        for (let j = 0; j < tplH; j++) {
+          let idxRow = idxSearch;
+          for (let i = 0; i < tplW; i++) {
+            cross += (gray[idxRow++] - mean) * templatePixels[idxTemplate++];
+          }
+          idxSearch += sw;
+        }
+        const score = cross / denom;
+        if (score > bestScore) {
+          bestScore = score;
+          bestTplX = x;
+          bestTplY = y;
+        }
+      }
+    }
+
+    const tplGlobalX = sx + bestTplX;
+    const tplGlobalY = sy + bestTplY;
+    const candidateX = tplGlobalX + anchorX;
+    const candidateY = tplGlobalY + anchorY;
+    const candidateBox = {
+      x: Math.round(candidateX),
+      y: Math.round(candidateY),
+      w: trackBox.w,
+      h: trackBox.h
+    };
+
+    if (bestScore > acceptThreshold) {
       const alpha = 0.4;
-      trackBox.x = Math.round((1 - alpha) * trackBox.x + alpha * (sx + bestX));
-      trackBox.y = Math.round((1 - alpha) * trackBox.y + alpha * (sy + bestY));
+      const maxX = Math.max(0, trackCanvas.width - trackBox.w);
+      const maxY = Math.max(0, trackCanvas.height - trackBox.h);
+      const rawX = Math.max(0, Math.min(maxX, candidateX));
+      const rawY = Math.max(0, Math.min(maxY, candidateY));
+      const smoothX = (1 - alpha) * trackBox.x + alpha * rawX;
+      const smoothY = (1 - alpha) * trackBox.y + alpha * rawY;
+      trackBox.x = Math.round(Math.max(0, Math.min(maxX, smoothX)));
+      trackBox.y = Math.round(Math.max(0, Math.min(maxY, smoothY)));
       lostFrames = 0;
+      updateRoiFromTracker(trackBox);
       drawTrackedBoxes(trackBox);
     } else {
       lostFrames++;
-      // Draw weak candidate to visualize tracking even when low confidence
-      const visBox = { x: sx + bestX, y: sy + bestY, w: template.w, h: template.h };
-      drawTrackedBoxes(visBox, true);
+      const clamped = clampRect(candidateBox.x, candidateBox.y, candidateBox.w, candidateBox.h, trackCanvas.width, trackCanvas.height);
+      drawTrackedBoxes(clamped, true);
     }
 
-    // Reacquire with OCR if we've been lost for a while
     if (lostFrames > Math.round(trackerFps * 1.5)) {
       stopTemplateTracking();
     }
     scheduleTrackerTick();
+  }
+
+  function updateRoiFromTracker(box, immediate = false) {
+    if (!box || trackCanvas.width < 2 || trackCanvas.height < 2) return;
+    const base = Math.max(roiPadPx * 0.75, Math.min(trackCanvas.width, trackCanvas.height) * 0.025);
+    const pad = Math.round(base);
+    const target = clampRect(
+      box.x - pad,
+      box.y - pad,
+      box.w + pad * 2,
+      box.h + pad * 2,
+      trackCanvas.width,
+      trackCanvas.height
+    );
+    if (!ocrRoi || immediate) {
+      ocrRoi = target;
+    } else {
+      const blend = 0.35;
+      ocrRoi = {
+        x: Math.round(ocrRoi.x + (target.x - ocrRoi.x) * blend),
+        y: Math.round(ocrRoi.y + (target.y - ocrRoi.y) * blend),
+        w: Math.round(ocrRoi.w + (target.w - ocrRoi.w) * blend),
+        h: Math.round(ocrRoi.h + (target.h - ocrRoi.h) * blend)
+      };
+    }
+    ocrNoHitCount = Math.max(0, ocrNoHitCount - 1);
   }
 
   function drawTrackedBoxes(box, lowConfidence = false) {
@@ -1085,6 +1361,10 @@
     trackOverlayCtx.lineWidth = 2 * (window.devicePixelRatio || 1);
     trackOverlayCtx.strokeRect(whiteX, whiteY, whiteW, whiteH);
     trackOverlayCtx.restore();
+    if (!lowConfidence) {
+      lastTrackCenter = { x: centerX, y: y + Math.round(h / 2) };
+      lastTrackBox = { x, y, w, h };
+    }
     drawPositionOverlay();
   }
 
@@ -1162,6 +1442,9 @@
       trackOverlayCtx.strokeRect(whiteX, whiteY, whiteW, whiteH);
       trackOverlayCtx.restore();
     }
+
+    lastTrackBox = { x, y, w, h };
+    lastTrackCenter = { x: x + Math.round(w / 2), y: y + Math.round(h / 2) };
 
     // Update ROI and seed tracker
     if (!lockExact || found.exact) {
