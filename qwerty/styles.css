@@ -1,0 +1,223 @@
+:root {
+  --bg: #0f1115;
+  --panel: #171a21;
+  --fg: #e6e6e6;
+  --muted: #9aa0a6;
+  --accent: #4f8cff;
+  --accent-2: #7aa2ff;
+  --warn: #ff6b6b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+  background: radial-gradient(80% 80% at 50% 20%, #131622 0%, var(--bg) 60%);
+  color: var(--fg);
+}
+
+.container {
+  max-width: 1000px;
+  margin: 32px auto;
+  padding: 20px 20px 32px 20px;
+}
+
+.topbar {
+  margin-top: 28px;
+  margin-bottom: 18px;
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.topbar .stats {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.pill {
+  display: inline-block;
+  padding: 6px 10px;
+  border: 1px solid #2a2f3a;
+  background: var(--panel);
+  border-radius: 999px;
+  font-size: 12px;
+}
+
+.btn.small { padding: 6px 10px; font-size: 12px; border-radius: 8px; }
+
+.poswin { margin-left: auto; width: 240px; }
+.poswin-title { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.poswin #positionCanvas {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  display: block;
+  background: #000;
+  border-radius: 10px;
+  box-shadow: 0 6px 18px rgba(0,0,0,.35), inset 0 0 0 1px rgba(255,255,255,.04);
+}
+
+h1 {
+  margin: 0 0 16px 0;
+  font-size: 22px;
+  font-weight: 650;
+}
+
+.subhead {
+  margin: 22px 0 8px 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: #d7d9df;
+}
+
+.controls {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.controls.secondary {
+  margin: 8px 0 10px 0;
+}
+
+.controls.tertiary {
+  margin: 0 0 12px 0;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.controls.tertiary input[type="range"] {
+  width: 140px;
+}
+
+#stableOffsetX { width: 220px; }
+
+.controls.tertiary label { font-size: 13px; color: var(--fg); }
+
+.btn {
+  appearance: none;
+  border: 1px solid #2a2f3a;
+  background: var(--panel);
+  color: var(--fg);
+  padding: 10px 14px;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: transform .02s ease, border-color .15s ease, background .15s ease;
+}
+
+.btn:hover {
+  border-color: #3a4050;
+}
+
+.btn:active {
+  transform: translateY(1px);
+}
+
+.btn[disabled] {
+  opacity: .6;
+  cursor: not-allowed;
+}
+
+.btn.primary {
+  background: linear-gradient(180deg, var(--accent) 0%, var(--accent-2) 100%);
+  border: none;
+  color: white;
+}
+
+.input {
+  appearance: none;
+  border: 1px solid #2a2f3a;
+  background: var(--panel);
+  color: var(--fg);
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 14px;
+  min-width: 340px;
+}
+
+.hint {
+  margin: 10px 0 18px 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+label.toggle {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+  color: var(--fg);
+}
+
+.preview-wrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: 0 10px 30px rgba(0,0,0,.35), inset 0 0 0 1px rgba(255,255,255,.04);
+}
+
+#previewCanvas, #overlayCanvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+#overlayCanvas {
+  pointer-events: auto;
+  cursor: crosshair;
+}
+
+.selecting #overlayCanvas {
+  cursor: crosshair;
+}
+
+.not-capturing #overlayCanvas {
+  cursor: not-allowed;
+}
+
+#trackCanvas, #trackOverlayCanvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+#stableCanvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+#maskCanvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+@media (max-width: 600px) {
+  .container { padding: 16px; }
+  h1 { font-size: 18px; }
+}
+
+

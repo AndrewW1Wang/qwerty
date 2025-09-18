@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tab Mirror Zoomer</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="https://unpkg.com/tesseract.js@2.1.5/dist/tesseract.min.js"></script>
+  </head>
+  <body>
+    <main class="container">
+      <h1>Tab Mirror Zoomer</h1>
+      <div id="topBar" class="topbar">
+        <div class="stats">
+          <span class="pill">orderbook</span>
+          <span class="pill">flat status:</span>
+          <button class="btn small" id="flattenBtn">Flatten</button>
+          <button class="btn small" id="shortBtn">Short</button>
+          <button class="btn small" id="longBtn">Long</button>
+          <span class="pill">current vision: <strong id="cloudVisionStat"></strong></span>
+        </div>
+        <div class="poswin">
+          <div class="poswin-title">position window</div>
+          <canvas id="positionCanvas"></canvas>
+        </div>
+      </div>
+      <div class="controls">
+        <button id="watchBtn" class="btn primary">Watch</button>
+        <button id="resetBtn" class="btn" disabled>Reset position</button>
+      </div>
+      <p class="hint">Press Watch, pick your YouTube tab, then drag a rectangle on the preview to zoom that area. Use Reset to go back.</p>
+
+      <div id="previewWrap" class="preview-wrap">
+        <canvas id="previewCanvas"></canvas>
+        <canvas id="overlayCanvas"></canvas>
+      </div>
+
+      <h2 class="subhead">Word Tracker</h2>
+      <p class="hint">Tracks the word "POSITION" in the zoomed view and draws a white box below it.</p>
+      <div class="controls secondary">
+        <label for="fpsSelect">Refresh rate</label>
+        <select id="fpsSelect" class="btn">
+          <option value="1">1 fps</option>
+          <option value="2">2 fps</option>
+          <option value="4" selected>4 fps</option>
+          <option value="8">8 fps</option>
+          <option value="12">12 fps</option>
+          <option value="20">20 fps</option>
+        </select>
+        <label class="toggle">
+          <input id="gpuToggle" type="checkbox" checked /> GPU preprocess
+        </label>
+        <label class="toggle">
+          <input id="showBoxesToggle" type="checkbox" checked /> Show OCR boxes
+        </label>
+        <label class="toggle">
+          <input id="lockToggle" type="checkbox" checked /> Lock "POSITION" exactly
+        </label>
+        <button id="reacquireBtn" class="btn small">Reacquire</button>
+      </div>
+      <div class="controls tertiary">
+        <label for="contrastRange">Contrast</label>
+        <input id="contrastRange" type="range" min="0.8" max="3" step="0.1" value="1.6" />
+        <label for="thresholdRange">Threshold</label>
+        <input id="thresholdRange" type="range" min="-0.25" max="1" step="0.005" value="0.45" />
+        <label class="toggle">
+          <input id="binarizeToggle" type="checkbox" /> Binarize
+        </label>
+      </div>
+      <div id="trackerWrap" class="preview-wrap">
+        <canvas id="trackCanvas"></canvas>
+        <canvas id="trackOverlayCanvas"></canvas>
+      </div>
+
+      <h2 class="subhead">Stabilized View</h2>
+      <p class="hint">Centers the preview around the detected word to stabilize motion.</p>
+      <div class="controls tertiary">
+        <label for="stableOffsetX">Horizontal offset</label>
+        <input id="stableOffsetX" type="range" min="-0.5" max="0.5" step="0.01" value="-0.22" />
+        <span class="hint" id="stableOffsetXVal">-0.22</span>
+      </div>
+      <div id="stableWrap" class="preview-wrap">
+        <canvas id="stableCanvas"></canvas>
+      </div>
+
+      <h2 class="subhead">Color Masked</h2>
+      <div class="controls tertiary">
+        <label for="maskStrengthRange">Strength</label>
+        <input id="maskStrengthRange" type="range" min="0" max="100" step="1" value="35" />
+        <span class="hint">Keeps roughly white (#E1E3E8), green (#4E9A5C), red (#E82648)</span>
+      </div>
+      <div id="maskWrap" class="preview-wrap">
+        <canvas id="maskCanvas"></canvas>
+      </div>
+
+      <h2 class="subhead">Cloud OCR (Masked)</h2>
+      <div class="controls secondary">
+        <label class="toggle">
+          <input id="cloudOcrToggle" type="checkbox" /> Cloud OCR
+        </label>
+        <label for="cloudOcrFps">Rate</label>
+        <select id="cloudOcrFps" class="btn">
+          <option value="0.2">0.2 fps</option>
+          <option value="0.33">0.33 fps</option>
+          <option value="0.5" selected>0.5 fps</option>
+          <option value="1">1 fps</option>
+        </select>
+      </div>
+      <div class="controls tertiary">
+        <input id="cloudOcrUrl" class="input" type="text" placeholder="https://YOUR_CLOUD_RUN_URL/ocr-masked" />
+        <span id="cloudOcrStatus" class="hint"></span>
+      </div>
+      <p id="cloudOcrOutput" class="hint"></p>
+
+      <video id="sourceVideo" playsinline muted style="display:none"></video>
+    </main>
+
+    <script defer src="app.js"></script>
+  </body>
+  </html>
+
+
